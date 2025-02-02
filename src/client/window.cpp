@@ -371,13 +371,25 @@ bool set(HWND hwnd) {
 bool unset() {
   assert(g_hwnd);
 
+  // Get the current window procedure to check the chain state
+  auto currentWndProc = asWndProcP(OrigGetWindowLongA(g_hwnd, GWLP_WNDPROC));
+  
   // Put the game's intended WndProc back on top of the WndProc stack
   auto prevWndProc = asWndProcP(OrigSetWindowLongA(g_hwnd, GWLP_WNDPROC, asLong(g_gameWndProc)));
-  assert(RemixWndProc == prevWndProc);
-  
-  if(!prevWndProc) {
-    // It would be weird to have gotten here, but that's why we throw a warning
-    Logger::warn(kStr_unset_wndProcInvalidWarn);
+
+  // Instead of asserting, log any procedure mismatch and handle gracefully
+  if (prevWndProc != RemixWndProc) {
+    Logger::warn(format_string("Window procedure mismatch during unset. Expected: %p, Found: %p, Game: %p",
+                             RemixWndProc, prevWndProc, g_gameWndProc));
+    
+    // If the current procedure isn't ours but is the game's, we're already unset
+    if (currentWndProc == g_gameWndProc) {
+      Logger::info("Window procedure already restored to game's procedure");
+    } else {
+      // If we're in an unexpected state, attempt recovery by forcing the game's procedure
+      Logger::warn("Attempting to restore game window procedure");
+      OrigSetWindowLongA(g_hwnd, GWLP_WNDPROC, asLong(g_gameWndProc));
+    }
   }
 
   // Clean out the globals
