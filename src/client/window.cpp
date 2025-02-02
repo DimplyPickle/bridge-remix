@@ -351,16 +351,31 @@ bool set(HWND hwnd) {
   // Whether by explicit or implicit unset, assert these values have been undone
   assert(!g_hwnd);
   assert(!g_gameWndProc);
+  
+  // Get current window procedure before attempting to set ours
+  auto currentWndProc = asWndProcP(OrigGetWindowLongA(hwnd, GWLP_WNDPROC));
+  
+  // Set our window procedure and store the game's
   g_hwnd = hwnd;
   g_gameWndProc = asWndProcP(OrigSetWindowLongA(hwnd, GWLP_WNDPROC, asLong(RemixWndProc)));
 
-  // If the original SetWindowLong fails, then something is going on
-  if(!g_gameWndProc) {
-    Logger::err(kStr_set_failedErr);
-    return false;
+  // Handle failure cases
+  if (!g_gameWndProc) {
+    DWORD lastError = GetLastError();
+    
+    // If current procedure is null, the window might be in an invalid state
+    if (!currentWndProc) {
+      Logger::err(format_string("Current window procedure is null. Last error: 0x%08X", lastError));
+      g_hwnd = nullptr;
+      return false;
+    }
+    
+    // Store the current procedure as game's procedure
+    g_gameWndProc = currentWndProc;
+    Logger::warn(format_string("SetWindowLong failed, using current procedure: %p", currentWndProc));
   }
 
-  // Fix up DirectInput forwarding if setting has succeeded
+  // Fix up DirectInput forwarding
   DInputSetDefaultWindow(hwnd);
 
   Logger::debug(format_string(kStr_set_settingWndProc, RemixWndProc, g_gameWndProc));
@@ -369,24 +384,42 @@ bool set(HWND hwnd) {
 }
 
 bool unset() {
-  assert(g_hwnd);
+  if (!g_hwnd) {
+    Logger::warn("Attempted to unset with null window handle");
+    return true;
+  }
+
+  if (!IsWindow(g_hwnd)) {
+    Logger::warn("Window handle is no longer valid");
+    g_hwnd = nullptr;
+    g_gameWndProc = nullptr;
+    return true;
+  }
 
   // Get the current window procedure to check the chain state
   auto currentWndProc = asWndProcP(OrigGetWindowLongA(g_hwnd, GWLP_WNDPROC));
   
+  if (!g_gameWndProc) {
+    Logger::warn("Game window procedure is null during unset");
+    g_hwnd = nullptr;
+    return true;
+  }
+
   // Put the game's intended WndProc back on top of the WndProc stack
   auto prevWndProc = asWndProcP(OrigSetWindowLongA(g_hwnd, GWLP_WNDPROC, asLong(g_gameWndProc)));
 
-  // Instead of asserting, log any procedure mismatch and handle gracefully
-  if (prevWndProc != RemixWndProc) {
+  if (!prevWndProc) {
+    DWORD lastError = GetLastError();
+    Logger::warn(format_string("Failed to restore game procedure. Last error: 0x%08X", lastError));
+  } else if (prevWndProc != RemixWndProc) {
     Logger::warn(format_string("Window procedure mismatch during unset. Expected: %p, Found: %p, Game: %p",
                              RemixWndProc, prevWndProc, g_gameWndProc));
     
     // If the current procedure isn't ours but is the game's, we're already unset
     if (currentWndProc == g_gameWndProc) {
       Logger::info("Window procedure already restored to game's procedure");
-    } else {
-      // If we're in an unexpected state, attempt recovery by forcing the game's procedure
+    } else if (currentWndProc) {
+      // If we're in an unexpected state but have a valid current procedure
       Logger::warn("Attempting to restore game window procedure");
       OrigSetWindowLongA(g_hwnd, GWLP_WNDPROC, asLong(g_gameWndProc));
     }
